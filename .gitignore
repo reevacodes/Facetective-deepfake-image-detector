@@ -1,0 +1,8 @@
+# Ignore virtual environment and system files
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore large data
+Data/
