@@ -2,119 +2,119 @@ import os
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+import seaborn as sns
+
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from sklearn.utils import class_weight
+from sklearn.metrics import classification_report, confusion_matrix
+
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
-# Set paths
-data_real = "C:/Users/HP/OneDrive/Desktop/Projects/Deepfake Detector/Data/real"
-data_fake = "C:/Users/HP/OneDrive/Desktop/Projects/Deepfake Detector/Data/fake"
-
-
-# Image size
+# ---- STEP 1: Load Data ----
 IMG_SIZE = 128
+data_real = "Data/real"
+data_fake = "Data/fake"
 
-def load_images_from_folder(Data):
+def load_images(folder):
     images = []
-    for filename in os.listdir(Data):
-        img_path = os.path.join(Data, filename)
+    for filename in os.listdir(folder):
+        img_path = os.path.join(folder, filename)
         img = cv2.imread(img_path)
         if img is not None:
             img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
             images.append(img)
     return images
 
-print("[INFO] Loading real images...")
-real_data = load_images_from_folder(data_real)
-print("[INFO] Loading fake images...")
-fake_data = load_images_from_folder(data_fake)
+real_images = load_images(data_real)
+fake_images = load_images(data_fake)
 
-print(f"Total real images: {len(real_data)}")
-print(f"Total fake images: {len(fake_data)}")
+X = np.array(real_images + fake_images).astype("float32") / 255.0
+y = np.array([0]*len(real_images) + [1]*len(fake_images))  # 0: real, 1: fake
 
-X = np.array(real_data + fake_data)
-y = np.array([0] * len(real_data) + [1] * len(fake_data))  # 0: real, 1: fake
+# Class weights
+cw = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(y), y=y)
+class_weights = {0: cw[0], 1: cw[1]}
 
-X = X.astype("float32") / 255.0  # normalize
-
-# Split the data
+# ---- STEP 2: Split & Encode ----
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+y_train_cat = to_categorical(y_train, 2)
+y_test_cat = to_categorical(y_test, 2)
 
-# Convert labels to categorical
-y_train = to_categorical(y_train, 2)
-y_test = to_categorical(y_test, 2)
-
-# Data Augmentation
-datagen = ImageDataGenerator(
-    rotation_range=10,
-    zoom_range=0.1,
-    horizontal_flip=True
-)
+# ---- STEP 3: Data Augmentation ----
+datagen = ImageDataGenerator(rotation_range=10, zoom_range=0.1, horizontal_flip=True)
 datagen.fit(X_train)
 
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout, Input
-
-# Load MobileNetV2 base model (pretrained on ImageNet)
+# ---- STEP 4: Model Architecture ----
 base_model = MobileNetV2(input_shape=(IMG_SIZE, IMG_SIZE, 3), include_top=False, weights='imagenet')
-base_model.trainable = False  # Freeze the base
+base_model.trainable = False  # Freeze base model for initial training
 
-# Add custom classifier on top
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
 x = Dropout(0.3)(x)
 x = Dense(128, activation='relu')(x)
 x = Dropout(0.5)(x)
-predictions = Dense(2, activation='softmax')(x)
+output = Dense(2, activation='softmax')(x)
 
-# Final model
-model = Model(inputs=base_model.input, outputs=predictions)
+model = Model(inputs=base_model.input, outputs=output)
+model.compile(optimizer=Adam(1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
 
-# Compile
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+# ---- STEP 5: Callbacks ----
+callbacks = [
+    EarlyStopping(patience=5, restore_best_weights=True),
+    ModelCheckpoint("best_model.h5", save_best_only=True)
+]
 
+# ---- STEP 6: Train Initial Model ----
+history = model.fit(datagen.flow(X_train, y_train_cat, batch_size=32),
+                    epochs=10,
+                    validation_data=(X_test, y_test_cat),
+                    class_weight=class_weights,
+                    callbacks=callbacks)
 
-# Train
-print("[INFO] Training model...")
-history = model.fit(
-    datagen.flow(X_train, y_train, batch_size=32),
-    epochs=10,
-    validation_data=(X_test, y_test)
-)
+# ---- STEP 7: Fine-Tune Base Model ----
+base_model.trainable = True  # Unfreeze for fine-tuning
+model.compile(optimizer=Adam(1e-5), loss='categorical_crossentropy', metrics=['accuracy'])
 
-loss, acc = model.evaluate(X_test, y_test)
-print(f"[TEST] Accuracy: {acc*100:.2f}%")
+history_finetune = model.fit(datagen.flow(X_train, y_train_cat, batch_size=32),
+                             epochs=10,
+                             validation_data=(X_test, y_test_cat),
+                             class_weight=class_weights,
+                             callbacks=callbacks)
 
+# ---- STEP 8: Evaluation ----
+loss, acc = model.evaluate(X_test, y_test_cat)
+print(f"[FINAL TEST] Accuracy: {acc*100:.2f}%")
 
-from sklearn.metrics import classification_report, confusion_matrix
-import seaborn as sns
-
+# ---- STEP 9: Classification Report & Confusion Matrix ----
 y_pred = model.predict(X_test)
 y_pred_classes = np.argmax(y_pred, axis=1)
-y_true = np.argmax(y_test, axis=1)
+y_true = np.argmax(y_test_cat, axis=1)
 
-# Confusion matrix
 cm = confusion_matrix(y_true, y_pred_classes)
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.title("Confusion Matrix")
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
-plt.title("Confusion Matrix")
 plt.show()
 
-# Classification report
 print(classification_report(y_true, y_pred_classes, target_names=["Real", "Fake"]))
 
-model.save("deepfake_detector_model.h5")
+# ---- STEP 10: Save Final Model ----
+model.save("deepfake_image_model.h5")
 
-# Plot
-plt.plot(history.history['accuracy'], label='Train Accuracy')
-plt.plot(history.history['val_accuracy'], label='Val Accuracy')
-plt.title('Training Curve')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
+# ---- STEP 11: Accuracy Plot ----
+plt.plot(history.history['accuracy'] + history_finetune.history['accuracy'], label='Train Acc')
+plt.plot(history.history['val_accuracy'] + history_finetune.history['val_accuracy'], label='Val Acc')
+plt.title("Training Accuracy Over Epochs")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
 plt.legend()
 plt.show()
+
+
