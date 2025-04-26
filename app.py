@@ -1,9 +1,12 @@
 import streamlit as st
 import numpy as np
 import cv2
-import os
 from tensorflow.keras.models import load_model
 from PIL import Image
+import os
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
+print(f"Python version: {os.sys.version}")
+print(f"TensorFlow version: {__import__('tensorflow').__version__}")
 
 # Load best trained model
 model_path = os.path.join("best_model.h5")  # Make sure this file exists!
